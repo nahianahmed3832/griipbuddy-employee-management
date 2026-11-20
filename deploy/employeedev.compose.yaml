@@ -1,0 +1,91 @@
+name: griipbuddy-employee-dev
+
+services:
+  employee-db:
+    image: postgres:18.4-bookworm@sha256:882236b897e39051d2368c5ccc6cda944904723506b2dfc97f2a8f5bc9afa382
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: employee_dev
+      POSTGRES_USER: employee_dev_owner
+      POSTGRES_PASSWORD: ${EMPLOYEE_DEV_DB_OWNER_PASSWORD:?Set EMPLOYEE_DEV_DB_OWNER_PASSWORD}
+      POSTGRES_APP_PASSWORD: ${EMPLOYEE_DEV_DB_RUNTIME_PASSWORD:?Set EMPLOYEE_DEV_DB_RUNTIME_PASSWORD}
+      TZ: UTC
+    volumes:
+      - employee-dev-postgres:/var/lib/postgresql
+      - type: bind
+        source: ../docker/init-runtime.sh
+        target: /docker-entrypoint-initdb.d/10-runtime.sh
+        read_only: true
+        bind:
+          create_host_path: false
+    networks: [backend]
+    healthcheck:
+      test: [CMD, pg_isready, -U, employee_dev_owner, -d, employee_dev]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    mem_limit: 512m
+    cpus: 1
+    logging:
+      driver: json-file
+      options: { max-size: 10m, max-file: "3" }
+
+  employee-app:
+    image: ${EMPLOYEE_DEV_IMAGE:?Set the employee development image ID}
+    restart: unless-stopped
+    depends_on:
+      employee-db: { condition: service_healthy }
+    environment:
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: "1"
+      TZ: UTC
+      HOSTNAME: 0.0.0.0
+      PORT: 3000
+      APP_BASE_URL: https://employeedev.griipbuddy.com
+      AUTH_URL: https://employeedev.griipbuddy.com
+      AUTH_SECRET: ${EMPLOYEE_DEV_AUTH_SECRET:?Set EMPLOYEE_DEV_AUTH_SECRET}
+      ALLOW_LOCAL_HTTP: "false"
+      ALLOW_DEV_EMAIL_PREVIEW: "false"
+      DATABASE_URL: postgresql://employee_runtime:${EMPLOYEE_DEV_DB_RUNTIME_PASSWORD:?Set EMPLOYEE_DEV_DB_RUNTIME_PASSWORD}@employee-db:5432/employee_dev
+      PRIVATE_DOCUMENTS_DIR: /app/private/documents
+    volumes:
+      - employee-dev-documents:/app/private/documents
+    ports:
+      - "127.0.0.1:3101:3000"
+    networks: [frontend, backend]
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 768m
+    cpus: 1
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3000/api/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 10s
+      start_period: 30s
+      retries: 5
+    logging:
+      driver: json-file
+      options: { max-size: 10m, max-file: "3" }
+
+  employee-tools:
+    profiles: [tools]
+    image: ${EMPLOYEE_DEV_IMAGE:?Set the employee development image ID}
+    entrypoint: [node]
+    environment:
+      NEXT_TELEMETRY_DISABLED: "1"
+      MIGRATION_DATABASE_URL: postgresql://employee_dev_owner:${EMPLOYEE_DEV_DB_OWNER_PASSWORD:?Set EMPLOYEE_DEV_DB_OWNER_PASSWORD}@employee-db:5432/employee_dev
+    networks: [backend]
+    read_only: true
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=64m"]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+
+networks:
+  frontend: {}
+  backend: { internal: true }
+
+volumes:
+  employee-dev-postgres: {}
+  employee-dev-documents: {}
