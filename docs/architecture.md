@@ -102,7 +102,7 @@ Every download is authorized again. Deleting a document hides it but keeps the b
 
 In-app notifications are stored per recipient. Each time they are listed or opened, the user's permission for the source record is checked again.
 
-The daily job `npm run notifications:due` adds date-based reminders: missing checkouts, expiring documents and pending overtime. It is safe to run twice, because an advisory lock and event keys prevent duplicates.
+The daily job `npm run notifications:due` adds in-app reminders for missing checkouts, document expiry and pending overtime. A durable attempt ledger records processing and retries. An advisory lock and recipient/event keys protect repeated attempts. Published counts refer to committed inbox rows.
 
 ## Testing
 

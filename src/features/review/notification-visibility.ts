@@ -36,8 +36,8 @@ export function visibleNotifications(actor: Actor, reports: LeadPeriod[]) {
   (n.source_type = 'salary_periods' AND starts_with(n.event_type, 'STAFF_') AND EXISTS (SELECT 1 FROM salary_periods s WHERE s.id=n.source_id)) OR
   (n.source_type = 'attendance_corrections' AND EXISTS (SELECT 1 FROM attendance_corrections s WHERE s.id=n.source_id AND s.employee_id=n.employee_id)) OR
   (n.source_type = 'leave_requests' AND EXISTS (SELECT 1 FROM leave_requests s WHERE s.id=n.source_id AND s.employee_id=n.employee_id)) OR
-  (n.source_type = 'overtime_reviews' AND EXISTS (SELECT 1 FROM overtime_reviews s WHERE s.id=n.source_id AND s.employee_id=n.employee_id)) OR
-  (n.source_type = 'attendance_sessions' AND EXISTS (SELECT 1 FROM attendance_sessions s WHERE s.id=n.source_id AND s.employee_id=n.employee_id AND s.voided_at IS NULL)) OR
+  (n.source_type = 'overtime_reviews' AND EXISTS (SELECT 1 FROM overtime_reviews s WHERE s.id=n.source_id AND s.employee_id=n.employee_id AND (n.event_type <> 'STAFF_OVERTIME_PENDING' OR s.status='PENDING' AND n.event_key=concat('overtime-pending:',s.id,':',s.revision)))) OR
+  (n.source_type = 'attendance_sessions' AND EXISTS (SELECT 1 FROM attendance_sessions s WHERE s.id=n.source_id AND s.employee_id=n.employee_id AND s.voided_at IS NULL AND (n.event_type NOT IN ('MISSING_CHECKOUT','STAFF_MISSING_CHECKOUT') OR s.checkout_at IS NULL AND n.event_key=concat(CASE WHEN n.event_type='MISSING_CHECKOUT' THEN 'own-' ELSE '' END,'missing-checkout:',s.id,':',s.revision)))) OR
   (n.source_type = 'employee_documents' AND EXISTS (SELECT 1 FROM employee_documents s WHERE s.id=n.source_id AND s.employee_id=n.employee_id AND s.deleted_at IS NULL AND (starts_with(n.event_type, 'STAFF_') OR s.employee_visible AND NOT EXISTS (SELECT 1 FROM disciplinary_records w WHERE w.employee_id=s.employee_id AND w.attachment_document_id=s.id AND (w.published_at IS NULL OR NOT w.employee_visible OR w.revoked_at IS NOT NULL)) AND NOT EXISTS (SELECT 1 FROM incident_records i WHERE i.employee_id=s.employee_id AND i.evidence_document_id=s.id AND NOT i.employee_visible))))
  )`;
 }

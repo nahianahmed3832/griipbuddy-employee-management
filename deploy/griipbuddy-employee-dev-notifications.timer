@@ -1,0 +1,10 @@
+[Unit]
+Description=Check the GriipBuddy employee development notification schedule and retries
+
+[Timer]
+OnCalendar=*-*-* *:0/5:00 UTC
+AccuracySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -19,7 +19,7 @@ export async function reportPdf(identity: Identity | null, kind: unknown, query:
     return value;
   }));
   const columns: Column[] = data.columns.map(c => ({ label: c.label.replace(" seconds", "").replace(" (completed)", ""), width: 1, align: /_(seconds|amount|count)$/.test(c.key) ? "right" : "left" }));
-  pdf.paragraph(`${data.total} record${data.total === 1 ? "" : "s"}. Dates are inclusive and use the organization timezone.`);
+  pdf.paragraph(`${data.total} record${data.total === 1 ? "" : "s"}. Selected date filters include both displayed days in the organization timezone.`);
   pdf.table(columns, rows, { auto: true }); // column widths follow their content
   return { bytes: await pdf.bytes(), filename: `${data.kind}-report-${data.from ?? "all"}.pdf` };
 }

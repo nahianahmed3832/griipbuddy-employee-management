@@ -37,12 +37,13 @@ async function notifyLead(client: Database, employeeId: string, eventType: strin
 
 export async function notify(tx:Database,employeeId:string,eventType:string,sourceType:string,sourceId:string,eventKey:string,text:string,staff=false) {
  const employee=await tx.employee.findUniqueOrThrow({where:{id:employeeId},select:{userId:true}});
- const recipients=staff ? await tx.user.findMany({where:{isActive:true,...(sourceType==="preorders"?{OR:[{role:"ADMIN"},{role:"HR_MANAGER",canManageCommissions:true}]}:{role:{in:["ADMIN","HR_MANAGER"]}})},select:{id:true}}) : [{id:employee.userId}];
+ const recipients=staff ? await tx.user.findMany({where:{isActive:true,accountStatus:{not:"SUSPENDED"},...(sourceType==="preorders"?{OR:[{role:"ADMIN"},{role:"HR_MANAGER",canManageCommissions:true}]}:{role:{in:["ADMIN","HR_MANAGER"]}})},select:{id:true}}) : [{id:employee.userId}];
  if (staff) {
   const lead = await notifyLead(tx, employeeId, eventType, sourceType, sourceId);
   if (lead) recipients.push(lead);
  }
- for(const r of recipients) await tx.notification.upsert({where:{recipientUserId_eventKey:{recipientUserId:r.id,eventKey}},create:{recipientUserId:r.id,employeeId,eventType,sourceType,sourceId,eventKey,text},update:{}});
+ const published=await tx.notification.createMany({data:recipients.map(r=>({recipientUserId:r.id,employeeId,eventType,sourceType,sourceId,eventKey,text})),skipDuplicates:true});
+ return published.count;
 }
 async function sourceHref(client:Database,actor:Actor,row:{eventType:string,sourceType:string,sourceId:string,employeeId:string|null},reports:LeadPeriod[]) {
  if(row.sourceType==="salary_periods")return row.eventType.startsWith("STAFF_") && actor.role!=="EMPLOYEE" && await client.salaryPeriod.findUnique({where:{id:row.sourceId},select:{id:true}})?`/manage/salary?id=${row.sourceId}`:null;
@@ -82,13 +83,15 @@ async function sourceHref(client:Database,actor:Actor,row:{eventType:string,sour
   return source && (staff || await documentParentVisible(client,row.employeeId,row.sourceId))?`${prefix}/documents${staff?`?employeeId=${row.employeeId}`:""}`:null;
  }
  if(row.sourceType==="attendance_sessions") {
-  const source=await client.attendanceSession.findFirst({where:{...where,voidedAt:null},select:{workDate:true}});
+  const source=await client.attendanceSession.findFirst({where:{...where,voidedAt:null},select:{workDate:true,checkoutAt:true,revision:true}});
+  if (source && ["MISSING_CHECKOUT","STAFF_MISSING_CHECKOUT"].includes(row.eventType) && source.checkoutAt) return null;
   return source?staff?`/manage/employees/${row.employeeId}/attendance/day?date=${source.workDate.toISOString().slice(0,10)}`:`/me/attendance`:null;
  }
  if(row.sourceType==="attendance_corrections")return await client.attendanceCorrection.findFirst({where,select:{id:true}})?`${prefix}/corrections?id=${row.sourceId}`:null;
  if(row.sourceType==="leave_requests")return await client.leaveRequest.findFirst({where,select:{id:true}})?`${prefix}/leave?id=${row.sourceId}`:null;
  if(row.sourceType==="overtime_reviews") {
-  const source=await client.overtimeReview.findFirst({where,select:{weekStartDate:true}});
+  const source=await client.overtimeReview.findFirst({where,select:{weekStartDate:true,status:true}});
+  if (source && row.eventType==="STAFF_OVERTIME_PENDING" && source.status!=="PENDING") return null;
   return source?`${prefix}/overtime?${staff?`employeeId=${row.employeeId}&`:""}week=${source.weekStartDate.toISOString().slice(0,10)}`:null;
  }
  return null;

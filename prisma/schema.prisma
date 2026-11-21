@@ -530,6 +530,22 @@ model Notification {
  @@map("notifications")
 }
 
+model EmployeeNotificationAttempt {
+ scheduledFor DateTime @map("scheduled_for") @db.Timestamptz(3)
+ attempt Int
+ businessDate DateTime @map("business_date") @db.Date
+ timezone String @db.VarChar(100)
+ status String @db.VarChar(16)
+ startedAt DateTime @map("started_at") @db.Timestamptz(3)
+ finishedAt DateTime? @map("finished_at") @db.Timestamptz(3)
+ nextRetryAt DateTime? @map("next_retry_at") @db.Timestamptz(3)
+ scannedCount Int @default(0) @map("scanned_count")
+ publishedCount Int @default(0) @map("published_count")
+ failureCode String? @map("failure_code") @db.VarChar(32)
+ @@id([scheduledFor,attempt])
+ @@map("employee_notification_attempts")
+}
+
 model CompensationRate {
  id String @id @default(uuid()) @db.Uuid
  employeeId String @map("employee_id") @db.Uuid

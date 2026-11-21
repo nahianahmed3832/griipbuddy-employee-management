@@ -1,0 +1,9 @@
+[Unit]
+Description=GriipBuddy employee development in-app notifications
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/docker exec griipbuddy-employee-dev-employee-app-1 node --conditions=react-server --import tsx scripts/notifications-due.ts scheduled
+TimeoutStartSec=15min

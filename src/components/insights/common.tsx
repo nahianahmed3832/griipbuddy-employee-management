@@ -24,6 +24,7 @@ export function ReportFilters({ kind, query, employees, departments, range, time
     <SelectField label="Employee" name="employeeId" defaultValue={v("employeeId")}><option value="">All employees</option>{employees.map(e => <option key={e.id} value={e.id}>{e.employeeNumber} · {e.legalName}</option>)}</SelectField>
     <SelectField label="Department" name="departmentId" defaultValue={v("departmentId")}><option value="">All departments</option>{departments.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}</SelectField>
     <SelectField label="Status" name="status" defaultValue={v("status")}><option value="">All statuses</option>{reportStatuses[kind].map(s => <option key={s} value={s}>{words(s)}</option>)}</SelectField>
+    <SelectField label="Sort by employee ID" name="sort" defaultValue={v("sort") || "EMPLOYEE_ASC"}><option value="EMPLOYEE_ASC">Ascending</option><option value="EMPLOYEE_DESC">Descending</option></SelectField>
     {kind === "attendance" && <SelectField label="Dates shown" name="days" defaultValue={v("days") || "ACTIVE"}><option value="ACTIVE">Scheduled or worked days</option><option value="ALL">Every date in range</option></SelectField>}
   </FilterBar>;
 }
