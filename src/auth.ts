@@ -1,20 +1,31 @@
 import NextAuth, { type NextAuthConfig } from "next-auth";
 import { headers } from "next/headers";
-import { getToken, encode } from "next-auth/jwt";
+import { getToken, encode, type JWT } from "next-auth/jwt";
+import { randomUUID } from "node:crypto";
 import { rememberedSeconds } from "@/lib/auth/session-policy";
 import Credentials from "next-auth/providers/credentials";
 import { authenticateCredentials } from "@/lib/auth/credentials";
 import { SESSION_SECONDS } from "@/lib/authorization/policy";
-import { logUnexpected } from "@/lib/utils/errors";
+import { AppError, logUnexpected } from "@/lib/utils/errors";
 import { db } from "@/lib/db/client";
-import { loadActor } from "@/lib/authorization/actor";
 import { audit } from "@/lib/db/audit";
+import { authorizedMutation } from "@/lib/db/mutation";
+import { sessionFingerprint } from "@/lib/auth/revocation";
+import type { Identity } from "@/types/auth";
 
 const production = process.env.NODE_ENV === "production";
 const secure = process.env.APP_BASE_URL?.startsWith("https://") ?? production;
 if (production && !secure && process.env.ALLOW_LOCAL_HTTP !== "true") throw new Error("Production requires HTTPS; local Compose may explicitly allow loopback HTTP.");
 
-function configuration(lifetime: number): NextAuthConfig { return {
+function tokenIdentity(token: JWT | null | undefined, includeSessionId: boolean): Identity | undefined {
+  if (!token?.userId || typeof token.sessionVersion !== "number" || !token.issuedAt || !token.absoluteExpiresAt) return;
+  return {
+    userId: token.userId, sessionVersion: token.sessionVersion, issuedAt: token.issuedAt, absoluteExpiresAt: token.absoluteExpiresAt,
+    ...(includeSessionId && token.sessionId && { sessionId: token.sessionId }),
+  };
+}
+
+function configuration(lifetime: number, internalSession = false): NextAuthConfig { return {
   secret: process.env.AUTH_SECRET,
   trustHost: true, // The HTTP handler below normalizes to the configured canonical origin.
   useSecureCookies: secure,
@@ -27,23 +38,25 @@ function configuration(lifetime: number): NextAuthConfig { return {
   callbacks: {
     async jwt({ token, user }) {
       if (user) {
-        token = { userId: user.id, sessionVersion: user.sessionVersion, issuedAt: Date.now(), absoluteExpiresAt: Date.now() + (user.lifetime ?? SESSION_SECONDS) * 1000 };
-        // Use the same immutable millisecond instant for the lifetime calculation.
-        token.absoluteExpiresAt = token.issuedAt! + (user.lifetime ?? SESSION_SECONDS) * 1000;
+        const issuedAt = Date.now();
+        token = { userId: user.id, sessionVersion: user.sessionVersion, sessionId: randomUUID(), issuedAt,
+          absoluteExpiresAt: issuedAt + (user.lifetime ?? SESSION_SECONDS) * 1000 };
       }
-      if (!token.absoluteExpiresAt || token.absoluteExpiresAt <= Date.now()) return null;
-      if (!token.userId || typeof token.sessionVersion !== "number") return null;
-      const current = await db.user.findUnique({ where: { id: token.userId }, select: { isActive: true, accountStatus: true, sessionVersion: true, mustChangePassword: true, temporaryPasswordExpiresAt: true } });
-      if (!current?.isActive || current.accountStatus === "SUSPENDED" || current.sessionVersion !== token.sessionVersion ||
+      const identity = tokenIdentity(token, true);
+      if (!identity || identity.absoluteExpiresAt <= Date.now()) return null;
+      const [current, revoked] = await Promise.all([
+        db.user.findUnique({ where: { id: identity.userId }, select: { isActive: true, accountStatus: true, sessionVersion: true, mustChangePassword: true, temporaryPasswordExpiresAt: true } }),
+        db.employeeSessionRevocation.findUnique({ where: { fingerprint: sessionFingerprint(identity) }, select: { fingerprint: true } }),
+      ]);
+      if (revoked || !current?.isActive || current.accountStatus === "SUSPENDED" || current.sessionVersion !== identity.sessionVersion ||
         (current.mustChangePassword && (!current.temporaryPasswordExpiresAt || current.temporaryPasswordExpiresAt <= new Date()))) return null;
       return token;
     },
     session({ session, token }) {
       // No roles, grants or employee data in the browser-readable session endpoint.
       Reflect.deleteProperty(session, "user");
-      if (token.userId && typeof token.sessionVersion === "number" && token.issuedAt && token.absoluteExpiresAt) {
-        session.identity = { userId: token.userId, sessionVersion: token.sessionVersion, issuedAt: token.issuedAt, absoluteExpiresAt: token.absoluteExpiresAt };
-      }
+      const identity = tokenIdentity(token, internalSession);
+      if (identity) session.identity = identity;
       Reflect.set(session, "expires", new Date(token.absoluteExpiresAt ?? 0).toISOString());
       return session;
     },
@@ -54,12 +67,20 @@ function configuration(lifetime: number): NextAuthConfig { return {
   },
   events: { async signOut(message) {
     if (!("token" in message)) return;
-    const token = message.token;
-    if (!token?.userId || typeof token.sessionVersion !== "number" || !token.issuedAt || !token.absoluteExpiresAt) return;
+    const identity = tokenIdentity(message.token, true);
+    if (!identity) return;
     try {
-      const actor = await loadActor({ userId: token.userId, sessionVersion: token.sessionVersion, issuedAt: token.issuedAt, absoluteExpiresAt: token.absoluteExpiresAt }, undefined, true);
-      await audit({ actorUserId: actor.userId, action: "LOGOUT", entity: "users", entityId: actor.userId });
-    } catch { /* Revoked identities must still clear their cookies. */ }
+      await authorizedMutation(identity, async (actor, tx) => {
+        await tx.employeeSessionRevocation.deleteMany({ where: { expiresAt: { lte: new Date() } } });
+        await tx.employeeSessionRevocation.create({ data: {
+          fingerprint: sessionFingerprint(identity), userId: actor.userId, expiresAt: new Date(identity.absoluteExpiresAt),
+        } });
+        await audit({ actorUserId: actor.userId, action: "LOGOUT", entity: "users", entityId: actor.userId }, tx);
+      }, undefined, true);
+    } catch (error) {
+      // Logout still clears stale, expired and suspended cookies.
+      if (!(error instanceof AppError && error.status === 401)) logUnexpected("logout_revocation_failed");
+    }
   } },
   logger: { error() { logUnexpected("auth_failed"); }, warn(code) { if (code !== "debug-enabled") logUnexpected("auth_warning"); } },
 }; }
@@ -72,7 +93,7 @@ export const { handlers, auth, signIn, signOut } = NextAuth(async request => {
  if(request?.method==="POST" && new URL(request.url).pathname.endsWith("/callback/credentials")){
   const form=await request.clone().formData();lifetime=["true","on"].includes(String(form.get("remember")))?rememberedSeconds():SESSION_SECONDS;
  }
- return configuration(lifetime);
+ return configuration(lifetime, request === undefined);
 });
 export async function signInWithPolicy(input:{email:string;password:string},remember:boolean){
  return NextAuth(configuration(remember?rememberedSeconds():SESSION_SECONDS)).signIn("credentials",{...input,remember:String(remember),redirect:false});

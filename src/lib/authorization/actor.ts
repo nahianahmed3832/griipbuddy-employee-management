@@ -7,10 +7,15 @@ import { assertIdentity, assertAccount } from "./policy";
 import { AppError, logUnexpected } from "@/lib/utils/errors";
 import { businessDate } from "@/lib/utils/business-date";
 import { validated, uuidSchema } from "@/lib/validation/schemas";
+import { sessionFingerprint } from "@/lib/auth/revocation";
 
 export async function loadActor(identity: Identity | null, client: Database = db, allowPasswordChange = false): Promise<Actor> {
   assertIdentity(identity);
   validated(uuidSchema, identity.userId);
+  const revoked = await client.employeeSessionRevocation.findUnique({
+    where: { fingerprint: sessionFingerprint(identity) }, select: { fingerprint: true },
+  });
+  if (revoked) throw new AppError(401, "SESSION_REVOKED", "Please sign in again.");
   const account = await client.user.findUnique({ where: { id: identity.userId }, select: {
     id: true, email: true, displayName: true, role: true, isActive: true, accountStatus: true, sessionVersion: true, mustChangePassword: true,
     temporaryPasswordExpiresAt: true, canManageCommissions: true,
@@ -24,7 +29,8 @@ export async function loadActor(identity: Identity | null, client: Database = db
   if (!settings) throw new Error("Organization is not initialized");
   const today = businessDate(settings.timezone);
   const actor: Actor = {
-    ...identity, sessionVersion: account.sessionVersion, role: account.role, isActive: account.isActive, accountStatus: account.accountStatus, email: account.email,
+    userId: identity.userId, issuedAt: identity.issuedAt, absoluteExpiresAt: identity.absoluteExpiresAt,
+    sessionVersion: account.sessionVersion, role: account.role, isActive: account.isActive, accountStatus: account.accountStatus, email: account.email,
     name: account.employee?.preferredName ?? account.employee?.legalName ?? account.displayName ?? "Team member",
     mustChangePassword: account.mustChangePassword, employeeId: account.employee?.id ?? null,
     employmentActive: account.employee?.employmentPeriods.some(p => p.startDate <= today && (!p.endDate || today < p.endDate)) ?? false,

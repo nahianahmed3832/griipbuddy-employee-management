@@ -10,16 +10,50 @@ import { authorizedMutation } from "@/lib/db/mutation";
 import { validated,uuidSchema } from "@/lib/validation/schemas";
 import { AppError } from "@/lib/utils/errors";
 import type { Actor, Identity } from "@/types/auth";
+import { activePeriod, directReportPeriods, organizationDate, type LeadPeriod } from "./scope";
+
+async function leadReviewSource(client: Database, row: { eventType: string; sourceType: string; sourceId: string; employeeId: string | null }) {
+ const where = { id: row.sourceId, employeeId: row.employeeId ?? "" };
+ const select = { employmentPeriodId: true, employeeId: true } as const;
+ if (!row.employeeId) return null;
+ if (row.eventType === "STAFF_LEAVE_PENDING" && row.sourceType === "leave_requests")
+  return client.leaveRequest.findFirst({ where, select });
+ if (row.eventType === "STAFF_CORRECTION_PENDING" && row.sourceType === "attendance_corrections")
+  return client.attendanceCorrection.findFirst({ where, select });
+ return null;
+}
+
+async function notifyLead(client: Database, employeeId: string, eventType: string, sourceType: string, sourceId: string) {
+ const source = await leadReviewSource(client, { employeeId, eventType, sourceType, sourceId });
+ if (!source) return null;
+ const active = activePeriod(await organizationDate(client));
+ const period = await client.employmentPeriod.findFirst({
+  where: { id: source.employmentPeriodId, employeeId, ...active, managerEmployeeId: { not: employeeId },
+   manager: { user: { role: "EMPLOYEE", isActive: true, accountStatus: { not: "SUSPENDED" } }, employmentPeriods: { some: active } } },
+  select: { manager: { select: { userId: true } } },
+ });
+ return period?.manager ? { id: period.manager.userId } : null;
+}
+
 export async function notify(tx:Database,employeeId:string,eventType:string,sourceType:string,sourceId:string,eventKey:string,text:string,staff=false) {
  const employee=await tx.employee.findUniqueOrThrow({where:{id:employeeId},select:{userId:true}});
  const recipients=staff ? await tx.user.findMany({where:{isActive:true,...(sourceType==="preorders"?{OR:[{role:"ADMIN"},{role:"HR_MANAGER",canManageCommissions:true}]}:{role:{in:["ADMIN","HR_MANAGER"]}})},select:{id:true}}) : [{id:employee.userId}];
+ if (staff) {
+  const lead = await notifyLead(tx, employeeId, eventType, sourceType, sourceId);
+  if (lead) recipients.push(lead);
+ }
  for(const r of recipients) await tx.notification.upsert({where:{recipientUserId_eventKey:{recipientUserId:r.id,eventKey}},create:{recipientUserId:r.id,employeeId,eventType,sourceType,sourceId,eventKey,text},update:{}});
 }
-async function sourceHref(client:Database,actor:Actor,row:{eventType:string,sourceType:string,sourceId:string,employeeId:string|null}) {
+async function sourceHref(client:Database,actor:Actor,row:{eventType:string,sourceType:string,sourceId:string,employeeId:string|null},reports:LeadPeriod[]) {
  if(row.sourceType==="salary_periods")return row.eventType.startsWith("STAFF_") && actor.role!=="EMPLOYEE" && await client.salaryPeriod.findUnique({where:{id:row.sourceId},select:{id:true}})?`/manage/salary?id=${row.sourceId}`:null;
  if(!row.employeeId)return null;
  const staff=row.eventType.startsWith("STAFF_");
- if(staff && actor.role!=="ADMIN" && actor.role!=="HR_MANAGER" || !staff && actor.employeeId!==row.employeeId)return null;
+ if (!staff && actor.employeeId!==row.employeeId) return null;
+ if (staff && actor.role==="EMPLOYEE") {
+  const request = await leadReviewSource(client, row);
+  if (!request || !reports.some(period=>period.id===request.employmentPeriodId && period.employeeId===request.employeeId)) return null;
+  return `/manage/${row.sourceType==="leave_requests"?"leave":"corrections"}?id=${row.sourceId}`;
+ }
  const where={id:row.sourceId,employeeId:row.employeeId},prefix=staff?"/manage":"/me";
  if(row.sourceType==="employees")return row.sourceId===row.employeeId?`${prefix}${staff?`/employees/${row.employeeId}`:""}`:null;
  if(row.sourceType==="weekly_earning_statements")return await client.weeklyEarningStatement.findFirst({where:{...where,...(!staff?{status:"FINALIZED"}:{})},select:{id:true}})?`${prefix}/weekly-earnings`:null;
@@ -65,11 +99,11 @@ export async function notificationPage(identity:Identity|null,query:unknown={}) 
  return securityBoundary(identity,async actor=>{
   const v=validated(pageSchema,query);
   return db.$transaction(async tx=>{
-   const visible=visibleNotifications(actor),read=v.status==="UNREAD"?Prisma.sql`AND n.read_at IS NULL`:v.status==="READ"?Prisma.sql`AND n.read_at IS NOT NULL`:Prisma.empty;
+   const reports=await directReportPeriods(actor,tx),visible=visibleNotifications(actor,reports),read=v.status==="UNREAD"?Prisma.sql`AND n.read_at IS NULL`:v.status==="READ"?Prisma.sql`AND n.read_at IS NOT NULL`:Prisma.empty;
    const counts=await tx.$queryRaw<{total:bigint;unread:bigint}[]>(Prisma.sql`SELECT count(*) FILTER (WHERE true ${read}) AS total,count(*) FILTER (WHERE n.read_at IS NULL) AS unread FROM notifications n WHERE ${visible}`);
    const ids=await tx.$queryRaw<{id:string}[]>(Prisma.sql`SELECT n.id FROM notifications n WHERE ${visible} ${read} ORDER BY n.created_at DESC,n.id DESC LIMIT 25 OFFSET ${(v.page-1)*25}`);
    const rows=await tx.notification.findMany({where:{id:{in:ids.map(r=>r.id)}},orderBy:[{createdAt:"desc"},{id:"desc"}],select:{id:true,employeeId:true,eventType:true,text:true,sourceType:true,sourceId:true,readAt:true,createdAt:true}});
-   const items=await Promise.all(rows.map(async({employeeId,...row})=>{const href=await sourceHref(tx,actor,{...row,employeeId});return href?{...row,title:notificationTitle(row.eventType),href}:null;}));
+   const items=await Promise.all(rows.map(async({employeeId,...row})=>{const href=await sourceHref(tx,actor,{...row,employeeId},reports);return href?{...row,title:notificationTitle(row.eventType),href}:null;}));
    return {records:items.filter(item=>item!==null),total:Number(counts[0].total),unread:Number(counts[0].unread),page:v.page,pages:Math.max(1,Math.ceil(Number(counts[0].total)/25))};
   },{isolationLevel:"RepeatableRead"});
  });
@@ -77,10 +111,13 @@ export async function notificationPage(identity:Identity|null,query:unknown={}) 
 // Compatibility for existing consumers; new list requests use the paginated service.
 export async function notificationList(identity:Identity|null) { return (await notificationPage(identity)).records; }
 export async function unreadNotifications(identity:Identity|null) {
- return securityBoundary(identity,async actor=>{const result=await db.$queryRaw<{count:bigint}[]>(Prisma.sql`SELECT count(*) FROM notifications n WHERE ${visibleNotifications(actor)} AND n.read_at IS NULL`);return Number(result[0].count);});
+ return securityBoundary(identity,async actor=>{const reports=await directReportPeriods(actor);const result=await db.$queryRaw<{count:bigint}[]>(Prisma.sql`SELECT count(*) FROM notifications n WHERE ${visibleNotifications(actor,reports)} AND n.read_at IS NULL`);return Number(result[0].count);});
 }
 export async function readAllNotifications(identity:Identity|null) {
- return authorizedMutation(identity,async(actor,tx)=>({count:await tx.$executeRaw(Prisma.sql`UPDATE notifications n SET read_at=clock_timestamp() WHERE ${visibleNotifications(actor)} AND n.read_at IS NULL`)}));
+ return authorizedMutation(identity,async(actor,tx)=>{
+  const reports=await directReportPeriods(actor,tx);
+  return {count:await tx.$executeRaw(Prisma.sql`UPDATE notifications n SET read_at=clock_timestamp() WHERE ${visibleNotifications(actor,reports)} AND n.read_at IS NULL`)};
+ });
 }
 export async function notifySalaryPeriod(tx:Database,periodId:string,revision:number,status:string) {
  const recipients=await tx.user.findMany({where:{isActive:true,role:{in:["ADMIN","HR_MANAGER"]}},select:{id:true}});
@@ -89,8 +126,9 @@ export async function notifySalaryPeriod(tx:Database,periodId:string,revision:nu
 export async function readNotification(identity:Identity|null,input:unknown) {
  const id=validated(uuidSchema,input);
  return authorizedMutation(identity,async(actor,tx)=>{
-  const record=await tx.notification.findFirst({where:{id,recipientUserId:actor.userId,...(actor.role==="EMPLOYEE"?{eventType:{not:{startsWith:"STAFF_"}}}:{})}});
-  if(!record || !await sourceHref(tx,actor,record)) throw new AppError(404,"NOT_FOUND","Notification not found.");
+  const record=await tx.notification.findFirst({where:{id,recipientUserId:actor.userId}});
+  const reports=record?.eventType.startsWith("STAFF_")?await directReportPeriods(actor,tx):[];
+  if(!record || !await sourceHref(tx,actor,record,reports)) throw new AppError(404,"NOT_FOUND","Notification not found.");
   await tx.notification.update({where:{id},data:{readAt:record.readAt??new Date()}});
  });
 }

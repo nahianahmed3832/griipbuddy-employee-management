@@ -6,7 +6,7 @@ import { revalidatePath } from "next/cache";
 import { assertMutationOrigin, getIdentity } from "@/lib/auth/request";
 import { loginSchema } from "@/lib/validation/schemas";
 import { safeMessage } from "@/lib/utils/errors";
-import { createAccount, updateAccountSecurity, resetPassword, changeOwnPassword } from "./service";
+import { createAccount, updateAccountSecurity, resetPassword, changeOwnPassword, revokeAccountSessions } from "./service";
 import type { ActionState } from "@/types/auth";
 
 export async function loginAction(_: ActionState, form: FormData): Promise<ActionState> {
@@ -57,5 +57,12 @@ export async function resetPasswordAction(_: ActionState, form: FormData): Promi
     await assertMutationOrigin();
     await resetPassword(await getIdentity(), { userId: form.get("userId"), temporaryPassword: form.get("temporaryPassword") });
     return { success: "Temporary password reset. Existing sessions have been revoked." };
+  } catch (error) { return { error: safeMessage(error) }; }
+}
+export async function revokeSessionsAction(_: ActionState, form: FormData): Promise<ActionState> {
+  try {
+    await assertMutationOrigin();
+    await revokeAccountSessions(await getIdentity(), form.get("userId"));
+    return { success: "All existing sessions were signed out." };
   } catch (error) { return { error: safeMessage(error) }; }
 }

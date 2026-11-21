@@ -1,14 +1,24 @@
 import "server-only";
 import { Prisma } from "@/generated/prisma/client";
 import type { Actor } from "@/types/auth";
+import type { LeadPeriod } from "./scope";
 
 // Keep filtering in SQL so inaccessible sources never consume a page or unread count.
 // The source resolver repeats these checks before returning any stored message.
-export function visibleNotifications(actor: Actor) {
+export function visibleNotifications(actor: Actor, reports: LeadPeriod[]) {
  const staff = actor.role === "ADMIN" || actor.role === "HR_MANAGER";
  const commissionStaff = actor.role === "ADMIN" || actor.role === "HR_MANAGER" && actor.canManageCommissions;
+ const periods = reports.length ? Prisma.join(reports.map(report=>Prisma.sql`${report.id}::uuid`)) : null;
+ const leadReview = periods ? Prisma.sql`(
+  (n.event_type = 'STAFF_LEAVE_PENDING' AND n.source_type = 'leave_requests' AND EXISTS (
+    SELECT 1 FROM leave_requests r WHERE r.id=n.source_id AND r.employee_id=n.employee_id AND r.employment_period_id IN (${periods})
+  )) OR
+  (n.event_type = 'STAFF_CORRECTION_PENDING' AND n.source_type = 'attendance_corrections' AND EXISTS (
+    SELECT 1 FROM attendance_corrections r WHERE r.id=n.source_id AND r.employee_id=n.employee_id AND r.employment_period_id IN (${periods})
+  ))
+ )` : Prisma.sql`false`;
  return Prisma.sql`n.recipient_user_id = ${actor.userId}::uuid AND
-  ((starts_with(n.event_type, 'STAFF_') AND ${staff}) OR
+  ((starts_with(n.event_type, 'STAFF_') AND (${staff} OR ${leadReview})) OR
    (NOT starts_with(n.event_type, 'STAFF_') AND n.employee_id = ${actor.employeeId}::uuid)) AND (
   (n.source_type = 'employees' AND EXISTS (SELECT 1 FROM employees s WHERE s.id=n.source_id AND s.id=n.employee_id)) OR
   (n.source_type = 'weekly_earning_statements' AND EXISTS (SELECT 1 FROM weekly_earning_statements s WHERE s.id=n.source_id AND s.employee_id=n.employee_id AND (NOT starts_with(n.event_type, 'STAFF_') AND s.status='FINALIZED' OR starts_with(n.event_type, 'STAFF_') AND (${commissionStaff} OR s.calculation_snapshot->>'commissionRelated'='false')))) OR

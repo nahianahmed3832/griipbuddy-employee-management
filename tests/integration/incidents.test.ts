@@ -112,6 +112,13 @@ it("8. evidence stays private: staff-only until the record is shared, own-employ
   expect((await documents.listDocuments(alice, aliceId, true)).map(d => d.id)).toContain(doc.id);
   expect((await s.ownIncidents(alice, id)).records[0].evidence).toEqual({ id: doc.id, displayName: "Invoice 1042.pdf" });
   expect((await s.ownIncidents(bob)).records.map(r => r.id)).not.toContain(id);
+  const privateIncident = await s.createIncident(admin, { employeeId: aliceId, data: concern() });
+  await s.setIncidentEvidence(admin, { id: privateIncident, revision: 1, documentId: doc.id });
+  expect((await s.ownIncidents(alice, id)).records[0].evidence).toBeNull();
+  expect((await documents.listDocuments(alice, aliceId, true)).map(d => d.id)).not.toContain(doc.id);
+  await expect(documents.downloadDocument(alice, aliceId, doc.id, true)).rejects.toMatchObject({ status: 404 });
+  await s.setIncidentEvidence(admin, { id: privateIncident, revision: 2, documentId: null });
+  expect((await s.ownIncidents(alice, id)).records[0].evidence).toEqual({ id: doc.id, displayName: "Invoice 1042.pdf" });
   await s.setIncidentEvidence(admin, { id, revision: 5, documentId: null });
   expect(await db.auditLog.findMany({ where: { entityId: id, action: { startsWith: "INCIDENT_EVIDENCE" } }, select: { action: true }, orderBy: { eventTime: "asc" } })).toEqual([{ action: "INCIDENT_EVIDENCE_ATTACHED" }, { action: "INCIDENT_EVIDENCE_REMOVED" }]);
 });

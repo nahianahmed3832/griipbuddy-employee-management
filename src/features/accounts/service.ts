@@ -6,7 +6,7 @@ import { authorizedMutation } from "@/lib/db/mutation";
 import { assertRole } from "@/lib/authorization/policy";
 import { securityBoundary } from "@/lib/authorization/actor";
 import { loadActor } from "@/lib/authorization/actor";
-import { validated, createAccountSchema, accountSecuritySchema, resetPasswordSchema, changePasswordSchema } from "@/lib/validation/schemas";
+import { validated, uuidSchema, createAccountSchema, accountSecuritySchema, resetPasswordSchema, changePasswordSchema } from "@/lib/validation/schemas";
 import { hashPassword, verifyPassword } from "@/lib/auth/passwords";
 import { AppError } from "@/lib/utils/errors";
 import type { Identity } from "@/types/auth";
@@ -57,15 +57,19 @@ export async function updateAccountSecurity(identity: Identity | null, input: un
     if (value.canManageCommissions && value.role !== "HR_MANAGER") throw new AppError(400, "INVALID_GRANT", "Only HR managers use the management commission grant.");
     if (value.preorderCommissionEnabled && !target.employee) throw new AppError(400, "EMPLOYEE_REQUIRED", "This account has no employee profile.");
     if(target.id===actor.userId && !value.isActive)throw new AppError(403,"SELF_STATUS","You cannot suspend your own account.");
-    if (target.role === "ADMIN" && target.isActive && (value.role !== "ADMIN" || !value.isActive)) {
+    if (target.role === "ADMIN" && target.isActive && target.accountStatus === "ACTIVE" && (value.role !== "ADMIN" || !value.isActive)) {
       const admins = await tx.user.count({ where: { role: "ADMIN", isActive: true, accountStatus: "ACTIVE" } });
       if (admins <= 1) throw new AppError(409, "LAST_ADMIN", "Keep at least one active administrator.");
     }
-    await tx.user.update({ where: { id: target.id }, data: { role: value.role, isActive: value.isActive, canManageCommissions: value.canManageCommissions, sessionVersion: { increment: 1 } } });
+    const accountStatus = value.isActive && target.accountStatus === "SUSPENDED" ? "ACTIVE" : target.accountStatus;
+    await tx.user.update({ where: { id: target.id }, data: { role: value.role, isActive: value.isActive, accountStatus,
+      canManageCommissions: value.canManageCommissions, sessionVersion: { increment: 1 } } });
     if (target.employee) await tx.employee.update({ where: { id: target.employee.id }, data: { preorderCommissionEnabled: value.preorderCommissionEnabled } });
     await audit({ actorUserId: actor.userId, employeeId: target.employee?.id, action: "ACCOUNT_SECURITY_CHANGED", entity: "users", entityId: target.id,
-      before: { role: target.role, isActive: target.isActive, canManageCommissions: target.canManageCommissions, preorderCommissionEnabled: target.employee?.preorderCommissionEnabled ?? false },
-      after: { role: value.role, isActive: value.isActive, canManageCommissions: value.canManageCommissions, preorderCommissionEnabled: value.preorderCommissionEnabled } }, tx);
+      before: { role: target.role, isActive: target.isActive, accountStatus: target.accountStatus, canManageCommissions: target.canManageCommissions,
+        preorderCommissionEnabled: target.employee?.preorderCommissionEnabled ?? false },
+      after: { role: value.role, isActive: value.isActive, accountStatus, canManageCommissions: value.canManageCommissions,
+        preorderCommissionEnabled: value.preorderCommissionEnabled } }, tx);
   }, value.userId);
 }
 export async function resetPassword(identity: Identity | null, input: unknown) {
@@ -74,12 +78,26 @@ export async function resetPassword(identity: Identity | null, input: unknown) {
   const passwordHash = await hashPassword(value.temporaryPassword);
   await authorizedMutation(identity, async (actor, tx) => {
     assertRole(actor, ["ADMIN"]);
-    const target = await tx.user.findUnique({ where: { id: value.userId }, select: { id: true } });
+    if (actor.userId === value.userId) throw new AppError(403, "SELF_RESET", "Use Change password to update your own password.");
+    const target = await tx.user.findUnique({ where: { id: value.userId }, select: { id: true, passwordHash: true } });
     if (!target) throw new AppError(404, "NOT_FOUND", "Account not found.");
+    if (target.passwordHash.startsWith("$argon2") && await verifyPassword(target.passwordHash, value.temporaryPassword))
+      throw new AppError(400, "PASSWORD_REUSED", "Choose a different temporary password.");
     await tx.user.update({ where: { id: target.id }, data: { passwordHash, mustChangePassword: true, temporaryPasswordExpiresAt: new Date(Date.now() + 86400000),
       sessionVersion: { increment: 1 }, failedLoginCount: 0, lockedUntil: null, lastFailedLoginAt: null } });
     await audit({ actorUserId: actor.userId, action: "PASSWORD_RESET", entity: "users", entityId: target.id }, tx);
   }, value.userId);
+}
+export async function revokeAccountSessions(identity: Identity | null, input: unknown) {
+  await securityBoundary(identity, async actor => assertRole(actor, ["ADMIN"]));
+  const userId = validated(uuidSchema, input);
+  await authorizedMutation(identity, async (actor, tx) => {
+    assertRole(actor, ["ADMIN"]);
+    const target = await tx.user.findUnique({ where: { id: userId }, select: { id: true } });
+    if (!target) throw new AppError(404, "NOT_FOUND", "Account not found.");
+    await tx.user.update({ where: { id: target.id }, data: { sessionVersion: { increment: 1 } } });
+    await audit({ actorUserId: actor.userId, action: "ACCOUNT_SESSIONS_REVOKED", entity: "users", entityId: target.id }, tx);
+  }, userId);
 }
 export async function changeOwnPassword(identity: Identity | null, input: unknown) {
   // Only this operation allows a forced-change identity into a mutation.

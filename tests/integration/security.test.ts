@@ -70,13 +70,54 @@ describe("actual PostgreSQL-backed server operations", () => {
     await expect(employeeProfile(admin, randomUUID())).rejects.toMatchObject({ status: 404 });
   });
   it("does not trust submitted roles or user IDs for account administration", async () => {
-    const { createAccount, updateAccountSecurity, resetPassword, listAccounts } = await import("@/features/accounts/service");
+    const { createAccount, updateAccountSecurity, resetPassword, revokeAccountSessions, listAccounts } = await import("@/features/accounts/service");
     await expect(createAccount(alice, { role: "ADMIN" })).rejects.toMatchObject({ status: 403 });
     await expect(updateAccountSecurity(hr, { userId: admin.userId, role: "ADMIN" })).rejects.toMatchObject({ status: 403 });
     await expect(resetPassword(alice, { userId: bob.userId })).rejects.toMatchObject({ status: 403 });
+    await expect(revokeAccountSessions(hr, bob.userId)).rejects.toMatchObject({ status: 403 });
+    await expect(resetPassword(admin, { userId: admin.userId, temporaryPassword: "New-temporary-password-2026" })).rejects.toMatchObject({ code: "SELF_RESET" });
+    await expect(resetPassword(admin, { userId: bob.userId, temporaryPassword: "Foundation-test-password-2026" })).rejects.toMatchObject({ code: "PASSWORD_REUSED" });
     await expect(listAccounts(hr)).rejects.toMatchObject({ status: 403 });
     const { updateSettings } = await import("@/features/settings/service");
     await expect(updateSettings(hr, {})).rejects.toMatchObject({ status: 403 });
+  });
+  it("checks signed-session revocations at the data boundary and keeps separately issued sessions valid", async () => {
+    const { ownProfile } = await import("@/features/people/data");
+    const { sessionFingerprint } = await import("@/lib/auth/revocation");
+    const individual = { ...alice, sessionId: randomUUID() };
+    for (const session of [alice, individual]) {
+      await db.employeeSessionRevocation.create({ data: {
+        fingerprint: sessionFingerprint(session), userId: session.userId, expiresAt: new Date(session.absoluteExpiresAt),
+      } });
+      await expect(ownProfile(session)).rejects.toMatchObject({ code: "SESSION_REVOKED", status: 401 });
+    }
+    expect((await ownProfile({ ...alice, sessionId: randomUUID() }))?.id).toBe(aliceEmployee);
+    // Issue a fresh legacy-style identity for later lifecycle cases in this suite.
+    const active = identity(alice.userId);
+    expect(active.issuedAt).toBeGreaterThan(alice.issuedAt);
+    alice = active;
+  });
+  it("reactivates a suspended account without restoring prior sessions and restricts account-wide revoke to administrators", async () => {
+    const { updateAccountSecurity, revokeAccountSessions } = await import("@/features/accounts/service");
+    const { changeEmployeeStatus } = await import("@/features/accounts/controls");
+    const { ownProfile } = await import("@/features/people/data");
+    const { authenticateCredentials } = await import("@/lib/auth/credentials");
+    const credentials = { email: "alice@example.test", password: "Foundation-test-password-2026" };
+    await changeEmployeeStatus(admin, { employeeId: aliceEmployee, status: "SUSPENDED", reason: "Synthetic account lifecycle" });
+    await expect(ownProfile(alice)).rejects.toMatchObject({ status: 401 });
+    expect(await authenticateCredentials(credentials)).toBeNull();
+    await updateAccountSecurity(admin, { userId: alice.userId, role: "EMPLOYEE", isActive: true,
+      canManageCommissions: false, preorderCommissionEnabled: false });
+    await expect(ownProfile(alice)).rejects.toMatchObject({ status: 401 });
+    const account = await authenticateCredentials(credentials);
+    expect(account).toMatchObject({ id: alice.userId, sessionVersion: 3 });
+    const currentAlice = identity(alice.userId, 3);
+    expect((await ownProfile(currentAlice))?.id).toBe(aliceEmployee);
+    await revokeAccountSessions(admin, alice.userId);
+    await expect(ownProfile(currentAlice)).rejects.toMatchObject({ status: 401 });
+    expect(await authenticateCredentials(credentials)).toMatchObject({ id: alice.userId, sessionVersion: 4 });
+    expect(await db.auditLog.count({ where: { action: "ACCOUNT_SESSIONS_REVOKED", entityId: alice.userId } })).toBe(1);
+    alice = identity(alice.userId, 4);
   });
   it("protects the last active administrator", async () => {
     const { updateAccountSecurity } = await import("@/features/accounts/service");
@@ -109,9 +150,9 @@ describe("actual PostgreSQL-backed server operations", () => {
     await expect(ownProfile({ ...alice, absoluteExpiresAt: Date.now() - 1 })).rejects.toMatchObject({ status: 401 });
     await db.user.update({ where: { id: alice.userId }, data: { isActive: false } });
     await expect(ownProfile(alice)).rejects.toMatchObject({ status: 401 });
-    await db.user.update({ where: { id: alice.userId }, data: { isActive: true, sessionVersion: 2 } });
+    await db.user.update({ where: { id: alice.userId }, data: { isActive: true, sessionVersion: { increment: 1 } } });
     await expect(ownProfile(alice)).rejects.toMatchObject({ status: 401 });
-    alice = identity(alice.userId, 2);
+    alice = identity(alice.userId, alice.sessionVersion + 1);
     await db.employmentPeriod.updateMany({ where: { employeeId: aliceEmployee }, data: { endDate: new Date("2021-01-01") } });
     await expect(ownProfile(alice)).rejects.toMatchObject({ code: "EMPLOYMENT_INACTIVE" });
   });

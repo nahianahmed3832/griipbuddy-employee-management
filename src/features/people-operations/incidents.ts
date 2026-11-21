@@ -13,7 +13,7 @@ import { addDays, dateKey, dateValue, localDate, localInstant } from "@/features
 import { peopleEvent } from "@/features/people/service";
 import { notify } from "@/features/review/notifications";
 import { requireModule } from "@/features/settings/config";
-import { peopleStaff } from "./access";
+import { peopleStaff, documentsHiddenByParent } from "./access";
 import { incidentCategories, severities, incidentStatuses, correctiveActions, decisions, openStatuses, isPositive, reference, type IncidentStatus } from "./incident-options";
 // Employee incident & performance records. Staff (Admin, HR/Manager) manage records; an HR manager never manages
 // records about themselves. Employees see only their own records that staff explicitly shared, never internal notes,
@@ -305,12 +305,14 @@ export async function ownIncidents(identity: Identity | null, idInput?: unknown)
     const rows = await db.incidentRecord.findMany({ where: { employeeId: actor.employeeId, employeeVisible: true, ...(id ? { id } : {}) }, orderBy: [{ occurredOn: "desc" }, { number: "desc" }], take: 100 });
     if (id && !rows.length) throw new AppError(404, "NOT_FOUND", "Record not found.");
     const documents = await db.employeeDocument.findMany({ where: { id: { in: rows.map(r => r.evidenceDocumentId).filter((x): x is string => !!x) }, employeeId: actor.employeeId, employeeVisible: true, deletedAt: null }, select: { id: true, displayName: true } });
+    const hidden = await documentsHiddenByParent(db, actor.employeeId, documents.map(record => record.id));
+    const evidence = new Map(documents.filter(record => !hidden.has(record.id)).map(record => [record.id, record]));
     return { records: rows.map(r => ({
       id: r.id, revision: r.revision, reference: reference(r.number), kind: r.kind, category: r.category, title: r.title, description: r.description, impact: r.impact, severity: r.severity, status: r.status,
       occurredOn: dateKey(r.occurredOn), occurredAt: r.occurredAt, reviewNote: ["CONFIRMED", "DISPUTED", "UNSUBSTANTIATED", "RESOLVED", "CLOSED"].includes(r.status) ? r.reviewNote : null,
       correctiveAction: r.correctiveAction, correctiveNote: r.correctiveNote, followUpOn: r.followUpOn ? dateKey(r.followUpOn) : null, correctiveDone: !!r.correctiveCompletedAt, resolution: r.resolution,
       responseRequested: r.responseRequested, acknowledgedAt: r.acknowledgedAt, employeeResponse: r.employeeResponse, employeeDisputes: r.employeeDisputes, respondedAt: r.respondedAt,
-      evidence: documents.find(d => d.id === r.evidenceDocumentId) ?? null,
+      evidence: r.evidenceDocumentId ? evidence.get(r.evidenceDocumentId) ?? null : null,
     })) };
   });
 }

@@ -1,5 +1,5 @@
 import type { Role } from "@/generated/prisma/client";
-export type Identity = { userId: string; sessionVersion: number; issuedAt: number; absoluteExpiresAt: number };
+export type Identity = { userId: string; sessionVersion: number; issuedAt: number; absoluteExpiresAt: number; sessionId?: string };
 export type Actor = Identity & {
   role: Role;
   isActive: boolean;

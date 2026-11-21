@@ -19,10 +19,11 @@ export async function changeEmployeeStatus(identity:Identity|null,input:unknown)
   const target=employee.user;
   if(a.userId===target.id)throw new AppError(403,"SELF_STATUS","You cannot change your own status.");
   if(a.role==="HR_MANAGER" && target.role!=="EMPLOYEE")throw new AppError(403,"ROLE_DENIED","HR may manage employee accounts only.");
-  if(target.role==="ADMIN" && v.status!=="ACTIVE" && await tx.user.count({where:{role:"ADMIN",accountStatus:"ACTIVE",isActive:true}})<=1)throw new AppError(409,"LAST_ADMIN","Keep an active administrator.");
-  if(target.accountStatus===v.status)return;
-  await tx.user.update({where:{id:target.id},data:{accountStatus:v.status,isActive:v.status!=="SUSPENDED",sessionVersion:{increment:1}}});
-  await audit({actorUserId:a.userId,employeeId:employee.id,action:"ACCOUNT_STATUS_CHANGED",entity:"users",entityId:target.id,reason:v.reason,before:{status:target.accountStatus},after:{status:v.status}},tx);
+  if(target.role==="ADMIN" && target.isActive && target.accountStatus==="ACTIVE" && v.status!=="ACTIVE" && await tx.user.count({where:{role:"ADMIN",accountStatus:"ACTIVE",isActive:true}})<=1)throw new AppError(409,"LAST_ADMIN","Keep an active administrator.");
+  const isActive=v.status!=="SUSPENDED";
+  if(target.accountStatus===v.status && target.isActive===isActive)return;
+  await tx.user.update({where:{id:target.id},data:{accountStatus:v.status,isActive,sessionVersion:{increment:1}}});
+  await audit({actorUserId:a.userId,employeeId:employee.id,action:"ACCOUNT_STATUS_CHANGED",entity:"users",entityId:target.id,reason:v.reason,before:{status:target.accountStatus,isActive:target.isActive},after:{status:v.status,isActive}},tx);
   await tx.employeeActivity.create({data:{employeeId:employee.id,createdBy:a.userId,type:"ACCOUNT_STATUS_CHANGED",title:`Account status: ${v.status.replaceAll("_"," ")}`,description:"Contact HR for assistance.",sourceType:"employees",sourceId:employee.id,eventTime:await databaseNow(tx),employeeVisible:true}});
   await notify(tx,employee.id,"ACCOUNT_STATUS_CHANGED","employees",employee.id,`status:${target.id}:${target.sessionVersion+1}`,`Your account status is ${v.status.replaceAll("_"," ").toLowerCase()}. Contact HR for assistance.`);
  });

@@ -6,5 +6,5 @@ declare module "next-auth" {
   interface Session { identity?: Identity }
 }
 declare module "next-auth/jwt" {
-  interface JWT { userId?: string; sessionVersion?: number; issuedAt?: number; absoluteExpiresAt?: number }
+  interface JWT { userId?: string; sessionVersion?: number; issuedAt?: number; absoluteExpiresAt?: number; sessionId?: string }
 }

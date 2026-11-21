@@ -3,7 +3,7 @@ import { db } from "@/lib/db/client";
 import { audit,type Database } from "@/lib/db/audit";
 import { securityBoundary } from "@/lib/authorization/actor";
 import { authorizedMutation } from "@/lib/db/mutation";
-import { assertRole } from "@/lib/authorization/policy";
+import { assertOperational, assertRole } from "@/lib/authorization/policy";
 import { validated,uuidSchema } from "@/lib/validation/schemas";
 import { AppError } from "@/lib/utils/errors";
 import type { Identity } from "@/types/auth";
@@ -16,6 +16,7 @@ import {peopleEvent} from "@/features/people/service";
 import { reviewer,invalidateOvertime } from "./overtime";
 import { notify } from "./notifications";
 import { balanceCheck } from "./leave-balance";
+import { requestReviewScope, requestScopeWhere } from "./scope";
 export async function requiredOccurrence(tx:Database,o:Occurrence,holidayWorkRequired:boolean,timezone:string,earlyMinutes:number) {
  const [leaves,holidays]=await Promise.all([
   tx.leaveRequest.findMany({where:{employeeId:(await tx.employmentPeriod.findUniqueOrThrow({where:{id:o.employmentPeriodId},select:{employeeId:true}})).employeeId,status:"APPROVED",startAt:{lt:o.eligibleEndAt},endAt:{gt:o.scheduledStartAt}},select:{startAt:true,endAt:true}}),
@@ -46,9 +47,17 @@ export async function requestLeave(identity:Identity|null,input:unknown) {
  });
 }
 export async function decideLeave(identity:Identity|null,input:unknown) {
- await securityBoundary(identity,async actor=>assertRole(actor,["ADMIN","HR_MANAGER"]));const v=validated(leaveDecisionSchema,input);
+ await securityBoundary(identity,async actor=>requestReviewScope(actor));const v=validated(leaveDecisionSchema,input);
  return authorizedMutation(identity,async(actor,tx)=>{
-  const row=await tx.leaveRequest.findUnique({where:{id:v.id}});if(!row)throw new AppError(404,"NOT_FOUND","Leave not found.");reviewer(actor,row.employeeId);
+  const scope=await requestReviewScope(actor,tx);
+  const row=await tx.leaveRequest.findFirst({where:{id:v.id,...requestScopeWhere(scope)}});
+  if(!row)throw new AppError(404,"NOT_FOUND","Leave not found.");
+  if(scope.kind==="staff") reviewer(actor,row.employeeId);
+  else {
+   assertOperational(actor);
+   if(v.decision==="CANCELLED")throw new AppError(403,"ROLE_DENIED","Ask HR or an administrator to cancel approved leave.");
+   if(!v.comment)throw new AppError(400,"VALIDATION","Add a reason for this decision.");
+  }
   if(row.revision!==v.revision || (v.decision==="CANCELLED"?row.status!=="APPROVED":row.status!=="PENDING"))throw new AppError(409,"STALE","Leave changed; refresh before reviewing.");
   if(v.decision==="APPROVED"){
    const settings=await tx.organizationSettings.findUniqueOrThrow({where:{id:1}}),period=await tx.employmentPeriod.findUniqueOrThrow({where:{id:row.employmentPeriodId}});
@@ -80,13 +89,14 @@ export async function saveHoliday(identity:Identity|null,input:unknown) {
 }
 export async function absenceData(identity:Identity|null,staff=false,page=1,idInput?:unknown,filters:unknown={}) {
  return securityBoundary(identity,async actor=>{
-  if(staff)assertRole(actor,["ADMIN","HR_MANAGER"]);
+  const scope=staff?await requestReviewScope(actor):null;
   if(!Number.isInteger(page) || page<1 || page>10000)throw new AppError(400,"VALIDATION","Choose a valid page.");
   const id=idInput===undefined?undefined:validated(uuidSchema,idInput);
   const f=validated(leaveFilterSchema,filters);if(!staff&&f.employeeId)throw new AppError(400,"VALIDATION","Own leave identity comes from your account.");const timezone=(await db.organizationSettings.findUniqueOrThrow({where:{id:1}})).timezone;
-  const rows=await db.leaveRequest.findMany({where:{...(staff?f.employeeId?{employeeId:f.employeeId}:{}:{employeeId:actor.employeeId??"00000000-0000-0000-0000-000000000000"}),...(id||f.id?{id:id??f.id}:{}),...(f.status?{status:f.status}:{}),...(f.category?{category:f.category}:{}),...(f.from?{endAt:{gt:dayStart(f.from,timezone)}}:{}),...(f.until?{startAt:{lt:dayStart(f.until,timezone)}}:{})},skip:(page-1)*25,take:26,orderBy:[{createdAt:"desc"},{id:"desc"}],select:{id:true,employeeId:true,type:true,category:true,startAt:true,endAt:true,reason:true,status:true,createdAt:true,reviewedBy:true,reviewComment:true,reviewedAt:true,revision:true}});
+  const rows=await db.leaveRequest.findMany({where:{...(scope?{...requestScopeWhere(scope),...(f.employeeId?{employeeId:f.employeeId}:{})}:{employeeId:actor.employeeId??"00000000-0000-0000-0000-000000000000"}),...(id||f.id?{id:id??f.id}:{}),...(f.status?{status:f.status}:{}),...(f.category?{category:f.category}:{}),...(f.from?{endAt:{gt:dayStart(f.from,timezone)}}:{}),...(f.until?{startAt:{lt:dayStart(f.until,timezone)}}:{})},skip:(page-1)*25,take:26,orderBy:[{createdAt:"desc"},{id:"desc"}],select:{id:true,employeeId:true,type:true,category:true,startAt:true,endAt:true,reason:true,status:true,createdAt:true,reviewedBy:true,reviewComment:true,reviewedAt:true,revision:true}});
   if((id||f.id) && !rows.length)throw new AppError(404,"NOT_FOUND","Leave not found.");
-  return {records:await Promise.all(rows.slice(0,25).map(async({reviewedBy,...row})=>{const reviewer=reviewedBy?await db.user.findUnique({where:{id:reviewedBy},select:{displayName:true,employee:{select:{legalName:true}}}}):null;const decisions=await db.auditLog.findMany({where:{entity:"leave_requests",entityId:row.id,action:{in:["LEAVE_APPROVED","LEAVE_REJECTED","LEAVE_CANCELLED"]}},orderBy:{eventTime:"asc"},select:{id:true,action:true,reason:true,eventTime:true,actorUserId:true}});const reviewHistory=await Promise.all(decisions.map(async d=>{const person=d.actorUserId?await db.user.findUnique({where:{id:d.actorUserId},select:{displayName:true,employee:{select:{legalName:true}}}}):null;return {id:d.id,decision:d.action.replace("LEAVE_",""),comment:d.reason??"",at:d.eventTime,reviewerName:person?.employee?.legalName??person?.displayName??"Authorized staff"};}));const overBalance=staff && row.status==="PENDING"?(await balanceCheck(db,row.employeeId,row.category,row.startAt,row.endAt,true)).over:[];return {...row,reviewHistory,overBalance,reviewerName:reviewer?.employee?.legalName??reviewer?.displayName??null,employee:staff?await db.employee.findUniqueOrThrow({where:{id:row.employeeId},select:{legalName:true}}):null,canDecide:staff && !(actor.role==="HR_MANAGER" && actor.employeeId===row.employeeId)};})),hasNext:rows.length>25,page,
+  return {records:await Promise.all(rows.slice(0,25).map(async({reviewedBy,...row})=>{const reviewer=reviewedBy?await db.user.findUnique({where:{id:reviewedBy},select:{displayName:true,employee:{select:{legalName:true}}}}):null;const decisions=await db.auditLog.findMany({where:{entity:"leave_requests",entityId:row.id,action:{in:["LEAVE_APPROVED","LEAVE_REJECTED","LEAVE_CANCELLED"]}},orderBy:{eventTime:"asc"},select:{id:true,action:true,reason:true,eventTime:true,actorUserId:true}});const reviewHistory=await Promise.all(decisions.map(async d=>{const person=d.actorUserId?await db.user.findUnique({where:{id:d.actorUserId},select:{displayName:true,employee:{select:{legalName:true}}}}):null;return {id:d.id,decision:d.action.replace("LEAVE_",""),comment:d.reason??"",at:d.eventTime,reviewerName:person?.employee?.legalName??person?.displayName??"Authorized staff"};}));const overBalance=scope?.kind==="staff" && row.status==="PENDING"?(await balanceCheck(db,row.employeeId,row.category,row.startAt,row.endAt,true)).over:[];return {...row,reviewHistory,overBalance,reviewerName:reviewer?.employee?.legalName??reviewer?.displayName??null,employee:staff?await db.employee.findUniqueOrThrow({where:{id:row.employeeId},select:{legalName:true}}):null,canDecide:scope?.kind==="lead"?actor.accountStatus!=="ON_HOLD":staff && !(actor.role==="HR_MANAGER" && actor.employeeId===row.employeeId)};})),hasNext:rows.length>25,page,
+   reviewMode:scope?.kind,leadEmployees:scope?.kind==="lead"?scope.periods.map(({employeeId,employee})=>({id:employeeId,legalName:employee.legalName})):undefined,
    holidays:await db.calendarDay.findMany({orderBy:{localDate:"desc"},take:100,select:{id:true,localDate:true,name:true}}),timezone};
  });
 }

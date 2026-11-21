@@ -103,8 +103,8 @@ export async function updateEmployment(identity: Identity | null, input: unknown
     const catalogs = await resolveEmploymentCatalogs(tx, actor.userId, value.employment, period);
     await tx.employmentPeriod.update({ where: { id: period.id }, data: { ...value.employment, ...catalogs, revision: { increment: 1 } } });
     await audit({ actorUserId: actor.userId, employeeId: period.employeeId, action: "EMPLOYMENT_CHANGED", entity: "employment_periods", entityId: period.id, reason: value.reason,
-      before: { departmentId: period.departmentId, positionId: period.positionId, departmentLabel: period.departmentLabel, positionLabel: period.positionLabel, startDate: period.startDate.toISOString(), endDate: period.endDate?.toISOString() ?? null },
-      after: { departmentId: catalogs.departmentId, positionId: catalogs.positionId, departmentLabel: catalogs.departmentLabel, positionLabel: catalogs.positionLabel, startDate: value.employment.startDate.toISOString(), endDate: value.employment.endDate?.toISOString() ?? null } }, tx);
+      before: { departmentId: period.departmentId, positionId: period.positionId, departmentLabel: period.departmentLabel, positionLabel: period.positionLabel, managerEmployeeId: period.managerEmployeeId, startDate: period.startDate.toISOString(), endDate: period.endDate?.toISOString() ?? null },
+      after: { departmentId: catalogs.departmentId, positionId: catalogs.positionId, departmentLabel: catalogs.departmentLabel, positionLabel: catalogs.positionLabel, managerEmployeeId: value.employment.managerEmployeeId, startDate: value.employment.startDate.toISOString(), endDate: value.employment.endDate?.toISOString() ?? null } }, tx);
     if (value.employment.endDate?.getTime() !== period.endDate?.getTime()) {
       const zone=(await tx.organizationSettings.findUniqueOrThrow({where:{id:1},select:{timezone:true}})).timezone;
       const first=[value.employment.endDate,period.endDate].filter((v):v is Date=>!!v).sort((a,b)=>a.getTime()-b.getTime())[0];

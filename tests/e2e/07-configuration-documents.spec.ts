@@ -1,6 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
-import { signedIn, login, sql, dhaka, addDays, weekStart, confirm, expectToast, createEmployee, employeeId } from "./helpers";
+import { signedIn, login, sql, dhaka, addDays, weekStart, confirm, expectToast, createEmployee, employeeId, noHorizontalOverflow } from "./helpers";
+import sharp from "sharp";
 // Configurable organization through the real UI: branding, rules, module switches, editable lists, leave balances,
 // the live check-in clock, payout details and branded PDF/CSV documents.
 const weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
@@ -8,6 +9,52 @@ async function download(page: Page, trigger: () => Promise<void>) {
   const [file] = await Promise.all([page.waitForEvent("download"), trigger()]);
   return { name: file.suggestedFilename(), bytes: readFileSync((await file.path())!) };
 }
+test("a released private document stays usable by keyboard on mobile and restricted to its owner", async ({ page }) => {
+  const ownerId = await employeeId("QA-002");
+  const title = "R09 synthetic document";
+  const png = await sharp({ create: { width: 3, height: 2, channels: 3, background: "#16448a" } }).png().toBuffer();
+  const staffList = `/api/employees/${ownerId}/documents`;
+  await signedIn(page, "admin");
+  const origin = new URL(page.url()).origin;
+  const uploaded = await page.request.post(staffList, {
+    headers: { origin },
+    multipart: { file: { name: "synthetic.png", mimeType: "image/png", buffer: png }, type: "OTHER",
+      displayName: title, expiresOn: addDays(dhaka().date, 20), employeeVisible: "on" },
+  });
+  expect(uploaded.status()).toBe(201);
+  const { id } = await uploaded.json();
+  const ownFile = `/api/me/documents/${id}`;
+  try {
+    const report = await page.request.get(`/api/manage/reports/documents?employeeId=${ownerId}`);
+    expect(report.ok()).toBeTruthy();
+    expect(report.headers()["cache-control"]).toBe("private, no-store");
+    expect((await report.json()).records.length).toBeGreaterThan(0);
+    await signedIn(page, "employee");
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/me/documents");
+    await noHorizontalOverflow(page);
+    const row = page.getByRole("row").filter({ hasText: title });
+    await expect(row.getByRole("cell").nth(0)).toContainText("Expires");
+    const link = row.getByRole("link", { name: `Download ${title}` });
+    await link.focus();
+    await expect(link).toBeFocused();
+    const file = await download(page, () => link.press("Enter"));
+    expect(file.name).toMatch(/\.png$/);
+    expect(file.bytes.length).toBeGreaterThan(0);
+    const preview = await page.request.get(ownFile + "?view=1");
+    expect(preview.headers()["content-disposition"]).toMatch(/^inline;/);
+    expect(preview.headers()["cache-control"]).toBe("private, no-store");
+    await signedIn(page, "colleague");
+    expect((await page.request.get(ownFile)).status()).toBe(404);
+    expect((await page.request.get(`/api/manage/reports/documents/pdf?employeeId=${ownerId}`)).status()).toBe(403);
+  } finally {
+    await signedIn(page, "admin");
+    const removed = await page.request.delete(staffList + "/" + id, { headers: { origin }, data: { reason: "Complete synthetic document acceptance" } });
+    expect(removed.ok()).toBeTruthy();
+  }
+  await signedIn(page, "employee");
+  expect((await page.request.get(ownFile)).status()).toBe(404);
+});
 test("sign-in and navigation show the organization logo and name; branding validates readable colors", async ({ page }) => {
   await page.goto("/login");
   await expect(page.locator("main img[src^='/brand/logo']").first()).toBeVisible();

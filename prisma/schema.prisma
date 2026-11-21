@@ -53,9 +53,21 @@ model User {
   createdPositions           Position[]
   createdWorkSchedules       WorkSchedule[]
   createdAttendanceSessions  AttendanceSession[]
+  sessionRevocations          EmployeeSessionRevocation[]
 
   @@index([role, isActive])
   @@map("users")
+}
+
+model EmployeeSessionRevocation {
+  fingerprint String   @id @db.Char(64)
+  userId      String   @map("user_id") @db.Uuid
+  expiresAt   DateTime @map("expires_at") @db.Timestamptz(3)
+  user        User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([expiresAt])
+  @@index([userId])
+  @@map("employee_session_revocations")
 }
 
 model Employee {

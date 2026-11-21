@@ -5,7 +5,7 @@ import { ShellFrame } from "./shell-frame";
  * Navigation is derived from the actor's server-side permissions. Unavailable features are omitted entirely
  * (never shown disabled), so employees without pre-order access see no trace of that feature.
  */
-export function navigationFor(actor: Actor, unread: number, disabled: string[] = []): NavGroup[] {
+export function navigationFor(actor: Actor, unread: number, disabled: string[] = [], teamReviewer = false): NavGroup[] {
   const groups: NavGroup[] = [{ label: "Overview", items: [{ href: "/dashboard", label: "Dashboard", icon: "dashboard" }, { href: "/notifications", label: "Notifications", icon: "notifications", badge: unread }] }];
   const personal = !!actor.employeeId && actor.employmentActive, commissions = actor.preorderCommissionEnabled && personal;
   if (actor.role !== "EMPLOYEE") {
@@ -23,10 +23,14 @@ export function navigationFor(actor: Actor, unread: number, disabled: string[] =
     { label: "My pay", items: [{ href: "/me/weekly-earnings", label: "Earnings", icon: "weekly" }, { href: "/me/salary", label: "Salary & payslips", icon: "salary" }, { href: "/me/compensation", label: "Compensation", icon: "adjustments" }, ...(commissions ? [{ href: "/me/commissions", label: "Pre-order commission", icon: "percent" }] : [])] },
     { label: "My records", items: [{ href: "/me", label: "Profile", icon: "profile" }, { href: "/me/ratings", label: "Ratings & targets", icon: "ratings" }, { href: "/me/documents", label: "Documents", icon: "documents" }, { href: "/me/leave", label: "Leave", icon: "leave" }, { href: "/me/performance", label: "Performance", icon: "performance" }, { href: "/me/incidents", label: "Incident records", icon: "incidents" }, { href: "/me/warnings", label: "Notices", icon: "warnings" }, { href: "/me/work-records", label: "Work records", icon: "records" }, { href: "/me/assets", label: "Assets", icon: "assets" }] },
   );
+  if (teamReviewer && actor.role === "EMPLOYEE" && personal) groups.push({ label: "Team approvals", items: [
+    { href: "/manage/leave", label: "Team leave", icon: "leave" },
+    { href: "/manage/corrections", label: "Team corrections", icon: "corrections" },
+  ] });
   // Switched-off modules disappear from navigation; their pages and APIs also return not found.
   return groups.map(g => ({ ...g, items: g.items.filter(i => !disabled.includes(i.href)) })).filter(g => g.items.length);
 }
-export function AppShell({ actor, companyName, logo, disabled, unread, children }: { actor: Actor; companyName: string; logo: string; disabled: string[]; unread: number; children: React.ReactNode }) {
-  const role = actor.role === "ADMIN" ? "Administrator" : actor.role === "HR_MANAGER" ? "HR / Manager" : "Employee";
-  return <ShellFrame groups={navigationFor(actor, unread, disabled)} logo={logo} name={actor.name} email={actor.email} role={role} companyName={companyName} unread={unread} onHold={actor.accountStatus === "ON_HOLD"}>{children}</ShellFrame>;
+export function AppShell({ actor, teamReviewer, companyName, logo, disabled, unread, children }: { actor: Actor; teamReviewer: boolean; companyName: string; logo: string; disabled: string[]; unread: number; children: React.ReactNode }) {
+  const role = actor.role === "ADMIN" ? "Administrator" : actor.role === "HR_MANAGER" ? "HR / Manager" : teamReviewer ? "Team lead" : "Employee";
+  return <ShellFrame groups={navigationFor(actor, unread, disabled, teamReviewer)} logo={logo} name={actor.name} email={actor.email} role={role} companyName={companyName} unread={unread} onHold={actor.accountStatus === "ON_HOLD"}>{children}</ShellFrame>;
 }

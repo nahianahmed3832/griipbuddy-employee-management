@@ -1,22 +1,35 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, request } from "@playwright/test";
 import { login, signedIn, qa, sql } from "./helpers";
 test("rejects a wrong password without revealing whether the account exists", async ({ page }) => {
   await login(page, "admin", "definitely-not-the-password");
   await expect(page.getByRole("alert").filter({ hasText: "Email or password was not accepted" }).first()).toBeVisible();
   await expect(page).toHaveURL(/\/login/);
 });
-test("remember me issues a 30-day session; a normal sign-in issues a 12-hour session; sign-out clears it", async ({ page, context }) => {
+test("normal and remembered lifetimes are distinct and sign-out revokes only that session", async ({ page, context, baseURL }) => {
   const sessionCookie = async () => (await context.cookies()).find(c => c.name.includes("session-token"));
   await login(page, "hr"); await page.waitForURL(/\/dashboard/);
   const normal = await sessionCookie(); expect(normal).toBeTruthy(); expect(normal!.httpOnly).toBe(true);
   expect(normal!.expires * 1000 - Date.now()).toBeLessThan(13 * 3600_000);
+  const independentState = await context.storageState();
   await login(page, "hr", qa.password, true); await page.waitForURL(/\/dashboard/);
   const remembered = await sessionCookie();
   expect(remembered!.expires * 1000 - Date.now()).toBeGreaterThan(29 * 86400_000);
+  const browserSession = await page.request.get("/api/auth/session");
+  expect(await browserSession.json()).not.toHaveProperty("identity.sessionId");
+  const signedOutState = await context.storageState();
   await page.getByRole("button", { name: "Open profile menu" }).click();
   await page.getByRole("button", { name: "Sign out" }).click();
   await page.waitForURL(/\/login/);
   await page.goto("/dashboard"); await expect(page).toHaveURL(/\/login/);
+  const signedOut = await request.newContext({ baseURL, storageState: signedOutState });
+  const independent = await request.newContext({ baseURL, storageState: independentState });
+  try {
+    expect((await signedOut.get("/api/me/dashboard")).status()).toBe(401);
+    expect((await independent.get("/api/me/dashboard")).status()).toBe(200);
+  } finally {
+    await signedOut.dispose();
+    await independent.dispose();
+  }
 });
 test("suspended accounts cannot sign in", async ({ page }) => {
   await login(page, "suspended");

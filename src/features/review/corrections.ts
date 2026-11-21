@@ -4,7 +4,7 @@ import { db } from "@/lib/db/client";
 import { audit,type Database } from "@/lib/db/audit";
 import { authorizedMutation } from "@/lib/db/mutation";
 import { securityBoundary } from "@/lib/authorization/actor";
-import { assertRole } from "@/lib/authorization/policy";
+import { assertOperational, assertRole } from "@/lib/authorization/policy";
 import { validated,uuidSchema } from "@/lib/validation/schemas";
 import { AppError } from "@/lib/utils/errors";
 import type { Identity,Actor } from "@/types/auth";
@@ -15,6 +15,7 @@ import { patternInclude,timeEvent } from "@/features/time/schedules";
 import { correctionSchema,correctionDecisionSchema,withdrawSchema,listSchema } from "./validation";
 import { reviewer,invalidateOvertime } from "./overtime";
 import { notify } from "./notifications";
+import { requestReviewScope, requestScopeWhere } from "./scope";
 function subject(actor:Actor,staffEmployeeId?:unknown) {
  if(staffEmployeeId!==undefined){assertRole(actor,["ADMIN","HR_MANAGER"]);return validated(uuidSchema,staffEmployeeId);}
  if(!actor.employeeId)throw new AppError(403,"PROFILE_REQUIRED","A linked employee profile is required.");return actor.employeeId;
@@ -53,6 +54,9 @@ export async function submitCorrection(identity:Identity|null,input:unknown,staf
   if(v.type==="VOID" && dateKey(target!.workDate)!==v.workDate)throw new AppError(400,"WORK_DATE","Use the target session's work date.");
   const resolved=await validateProposal(tx,employeeId,v,now,target);
   if(target && await tx.attendanceCorrection.count({where:{employeeId,sessionId:target.id,status:"PENDING"}}))throw new AppError(409,"REQUEST_PENDING","This session already has a pending correction.");
+  if(v.type==="ADD" && await tx.attendanceCorrection.count({where:{employeeId,type:"ADD",status:"PENDING",
+   proposedCheckinAt:v.checkinAt,proposedCheckoutAt:v.checkoutAt}}))
+   throw new AppError(409,"REQUEST_PENDING","A pending correction already covers this missing session.");
   const row=await tx.attendanceCorrection.create({data:{employeeId,employmentPeriodId:resolved.periodId,sessionId:v.sessionId,type:v.type,workDate:dateValue(v.workDate),scheduleSlotId:v.scheduleSlotId,
    proposedCheckinAt:v.checkinAt,proposedCheckoutAt:v.checkoutAt,reason:v.reason,originalValues:original(target),targetRevision:target?.revision,requestedBy:actor.userId,operationKey:v.operationKey}});
   await audit({actorUserId:actor.userId,employeeId,action:"CORRECTION_SUBMITTED",entity:"attendance_corrections",entityId:row.id,reason:v.reason,before:original(target),after:{type:v.type,checkinAt:v.checkinAt?.toISOString()??null,checkoutAt:v.checkoutAt?.toISOString()??null,workDate:v.workDate,status:"PENDING"}},tx);
@@ -65,9 +69,13 @@ export async function submitCorrection(identity:Identity|null,input:unknown,staf
  });
 }
 export async function decideCorrection(identity:Identity|null,input:unknown) {
- await securityBoundary(identity,async actor=>assertRole(actor,["ADMIN","HR_MANAGER"]));const v=validated(correctionDecisionSchema,input);
+ await securityBoundary(identity,async actor=>requestReviewScope(actor));const v=validated(correctionDecisionSchema,input);
  return authorizedMutation(identity,async(actor,tx)=>{
-  const row=await tx.attendanceCorrection.findUnique({where:{id:v.id}});if(!row)throw new AppError(404,"NOT_FOUND","Correction request not found.");reviewer(actor,row.employeeId);
+  const scope=await requestReviewScope(actor,tx);
+  const row=await tx.attendanceCorrection.findFirst({where:{id:v.id,...requestScopeWhere(scope)}});
+  if(!row)throw new AppError(404,"NOT_FOUND","Correction request not found.");
+  if(scope.kind==="staff") reviewer(actor,row.employeeId);
+  else assertOperational(actor);
   await tx.$queryRaw`SELECT id FROM employees WHERE id=${row.employeeId}::uuid FOR UPDATE`;const now=await databaseNow(tx);
   if(row.status!=="PENDING")throw new AppError(409,"DECIDED","This request has already been decided or withdrawn.");
   const target=row.sessionId?await tx.attendanceSession.findUnique({where:{id:row.sessionId}}):null;
@@ -105,17 +113,19 @@ export async function withdrawCorrection(identity:Identity|null,input:unknown) {
   if(!row)throw new AppError(404,"NOT_FOUND","Correction request not found.");if(row.status!=="PENDING")throw new AppError(409,"DECIDED","Only pending requests can be withdrawn.");
   await tx.attendanceCorrection.update({where:{id:row.id},data:{status:"WITHDRAWN"}});
   await audit({actorUserId:actor.userId,employeeId:row.employeeId,action:"CORRECTION_WITHDRAWN",entity:"attendance_corrections",entityId:row.id},tx);
+  await timeEvent(tx,row.employeeId,actor.userId,await databaseNow(tx),"CORRECTION_WITHDRAWN","Attendance correction withdrawn","attendance_corrections",row.id);
  });
 }
 export async function correctionList(identity:Identity|null,query:unknown={},staff=false,idInput?:unknown) {
  return securityBoundary(identity,async actor=>{
-  if(staff)assertRole(actor,["ADMIN","HR_MANAGER"]);const v=validated(listSchema,query),id=idInput===undefined?null:validated(uuidSchema,idInput);
-  const where={...(staff?{}:{employeeId:actor.employeeId??"00000000-0000-0000-0000-000000000000"}),...(v.status?{status:v.status}:{}),...(id?{id}:{})};
+  const scope=staff?await requestReviewScope(actor):null;
+  const v=validated(listSchema,query),id=idInput===undefined?null:validated(uuidSchema,idInput);
+  const where={...(scope?requestScopeWhere(scope):{employeeId:actor.employeeId??"00000000-0000-0000-0000-000000000000"}),...(v.status?{status:v.status}:{}),...(id?{id}:{})};
   const rows=await db.attendanceCorrection.findMany({where,orderBy:[{createdAt:"desc"},{id:"desc"}],skip:(v.page-1)*25,take:26,
    select:{id:true,employeeId:true,sessionId:true,type:true,workDate:true,scheduleSlotId:true,proposedCheckinAt:true,proposedCheckoutAt:true,reason:true,originalValues:true,status:true,reviewedAt:true,reviewedBy:true,reviewComment:true,createdAt:true,appliedSessionId:true}});
   if(id && !rows.length)throw new AppError(404,"NOT_FOUND","Correction request not found.");
   return {records:await Promise.all(rows.slice(0,25).map(async record=>{const {reviewedBy,...row}=record;return {...row,reviewerName:reviewedBy?(await db.user.findUniqueOrThrow({where:{id:reviewedBy},select:{displayName:true,employee:{select:{legalName:true}}}})).displayName??"Authorized reviewer":null,
-   relatedSchedule:row.scheduleSlotId?await db.scheduleSlot.findFirst({where:{id:row.scheduleSlotId,workSchedule:{employeeId:row.employeeId}},select:{weekday:true,startMinute:true,endMinute:true,endDayOffset:true,workSchedule:{select:{label:true}}}}):null,employee:staff?await db.employee.findUniqueOrThrow({where:{id:row.employeeId},select:{legalName:true,employeeNumber:true}}):null,canDecide:staff && !(actor.role==="HR_MANAGER" && actor.employeeId===row.employeeId)};})),page:v.page,hasNext:rows.length>25};
+   relatedSchedule:row.scheduleSlotId?await db.scheduleSlot.findFirst({where:{id:row.scheduleSlotId,workSchedule:{employeeId:row.employeeId}},select:{weekday:true,startMinute:true,endMinute:true,endDayOffset:true,workSchedule:{select:{label:true}}}}):null,employee:staff?await db.employee.findUniqueOrThrow({where:{id:row.employeeId},select:{legalName:true,employeeNumber:true}}):null,canDecide:scope?.kind==="lead"?actor.accountStatus!=="ON_HOLD":staff && !(actor.role==="HR_MANAGER" && actor.employeeId===row.employeeId)};})),page:v.page,hasNext:rows.length>25,reviewMode:scope?.kind};
  });
 }
 export async function correctionOptions(identity:Identity|null,staffEmployeeId?:unknown,targetId?:unknown) {

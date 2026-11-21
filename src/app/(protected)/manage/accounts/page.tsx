@@ -2,7 +2,7 @@ import { UserPlus, ShieldCheck } from "lucide-react";
 import { getIdentity } from "@/lib/auth/request";
 import { pageResult } from "@/lib/auth/page-result";
 import { listAccounts } from "@/features/accounts/service";
-import { createAccountAction, securityAction, resetPasswordAction } from "@/features/accounts/actions";
+import { createAccountAction, securityAction, resetPasswordAction, revokeSessionsAction } from "@/features/accounts/actions";
 import { Field, SelectField, CheckboxField, FieldGrid, FormSection } from "@/components/ui/field";
 import { ActionForm } from "@/components/ui/action-form";
 import { PageHeader } from "@/components/ui/page-header";
@@ -14,7 +14,8 @@ import { Avatar } from "@/components/ui/description-list";
 const roleName = (role: string) => role === "ADMIN" ? "Administrator" : role === "HR_MANAGER" ? "HR / Manager" : "Employee";
 function Roles() { return <><option value="EMPLOYEE">Employee</option><option value="HR_MANAGER">HR / Manager</option><option value="ADMIN">Administrator</option></>; }
 export default async function Accounts() {
-  const accounts = await pageResult(listAccounts(await getIdentity()));
+  const identity = await getIdentity();
+  const accounts = await pageResult(listAccounts(identity));
   return <>
     <PageHeader title="User accounts" description="Provision logins and manage roles, access and feature grants. Changes revoke the person’s existing sessions."
       actions={<Dialog sheet variant="default" trigger={<><UserPlus size={16} aria-hidden="true" />Create account</>} title="Create account" description="Temporary passwords expire after 24 hours and must be changed at first sign-in.">
@@ -31,7 +32,8 @@ export default async function Accounts() {
       <td>{account.mustChangePassword ? <StatusBadge status="PENDING" label="Change required" /> : <span className="text-[13px] text-muted-foreground">Set</span>}</td>
       <td><div className="flex justify-end gap-1">
         <Dialog triggerSize="sm" variant="outline" trigger="Manage access" triggerLabel={`Manage access for ${name}`} title={`Access · ${name}`} description="Role and grant changes take effect immediately and revoke existing sessions." size="sm"><ActionForm action={securityAction} submitLabel="Save access" confirmation={{ title: "Update account access?", description: "This changes what the person can see and do, and signs them out of existing sessions.", label: "Confirm change" }}><input type="hidden" name="userId" value={account.id} /><SelectField label="Role" name="role" defaultValue={account.role}><Roles /></SelectField><CheckboxField name="isActive" defaultChecked={account.isActive} label="Account active" description="Inactive accounts cannot sign in. For employees, prefer the account status controls on their profile." /><CheckboxField name="canManageCommissions" defaultChecked={account.canManageCommissions} label="Commission management (HR)" description="Allows an HR / Manager to manage pre-order commissions and grant access." />{account.employee && <CheckboxField name="preorderCommissionEnabled" defaultChecked={account.employee.preorderCommissionEnabled} label="Employee pre-order commission access" />}</ActionForm></Dialog>
-        <Dialog triggerSize="sm" variant="ghost" trigger="Reset password" triggerLabel={`Reset password for ${name}`} title={`Reset password · ${name}`} description="Revokes all sessions and requires a password change at next sign-in." size="sm"><ActionForm action={resetPasswordAction} resetOnSuccess submitLabel="Reset password" confirmation={{ title: "Reset this password?", description: "The person is signed out everywhere. Share the temporary password through a verified company channel.", label: "Reset password", destructive: true }}><input type="hidden" name="userId" value={account.id} /><Field label="New temporary password" name="temporaryPassword" type="password" autoComplete="new-password" required minLength={12} maxLength={128} hint="At least 12 characters; expires in 24 hours." /></ActionForm></Dialog>
+        {account.id !== identity?.userId && <Dialog triggerSize="sm" variant="ghost" trigger="Reset password" triggerLabel={`Reset password for ${name}`} title={`Reset password · ${name}`} description="Revokes all sessions and requires a password change at next sign-in." size="sm"><ActionForm action={resetPasswordAction} resetOnSuccess submitLabel="Reset password" confirmation={{ title: "Reset this password?", description: "The person is signed out everywhere. Share the temporary password through a verified company channel.", label: "Reset password", destructive: true }}><input type="hidden" name="userId" value={account.id} /><Field label="New temporary password" name="temporaryPassword" type="password" autoComplete="new-password" required minLength={12} maxLength={128} hint="At least 12 characters. Expires in 24 hours." /></ActionForm></Dialog>}
+        <Dialog triggerSize="sm" variant="ghost" trigger="Revoke sessions" triggerLabel={`Revoke sessions for ${name}`} title={`Revoke sessions · ${name}`} description="Signs out this account on all devices. The password and permissions stay the same." size="sm"><ActionForm action={revokeSessionsAction} submitLabel="Revoke all sessions" confirmation={{ title: "Revoke all sessions?", description: "This account will need to sign in again on every device.", label: "Revoke sessions", destructive: true }}><input type="hidden" name="userId" value={account.id} /></ActionForm></Dialog>
       </div></td></tr>; })}</tbody></table></TableContainer>}
   </>;
 }

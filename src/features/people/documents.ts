@@ -11,17 +11,20 @@ import type { Identity } from "@/types/auth";
 import { documentSchema, deleteDocumentSchema, documentVisibilitySchema } from "./validation";
 import { peopleEvent } from "./service";
 import type { FileHandle } from "node:fs/promises";
-import { documentParentVisible } from "@/features/people-operations/access";
+import { documentParentVisible, documentsHiddenByParent } from "@/features/people-operations/access";
 import { assertOption } from "@/features/settings/config";
 
 export async function listDocuments(identity: Identity | null, employeeId: unknown, personal = false) {
   return securityBoundary(identity, async actor => {
     const id = validated(uuidSchema, employeeId); assertEmployeeScope(actor, id);
     if (personal && actor.employeeId !== id) throw new AppError(404, "NOT_FOUND", "Document not found.");
-    const records=await db.employeeDocument.findMany({ where: { employeeId: id, deletedAt: null, ...(personal || actor.role === "EMPLOYEE" ? { employeeVisible: true } : {}) },
+    const releasedOnly = personal || actor.role === "EMPLOYEE";
+    const records=await db.employeeDocument.findMany({ where: { employeeId: id, deletedAt: null, ...(releasedOnly ? { employeeVisible: true } : {}) },
       take: 100, orderBy: { createdAt: "desc" }, select: { id: true, type: true, displayName: true, mimeType: true, fileSize: true, issuedOn: true, expiresOn: true, employeeVisible: true, createdAt: true,
         uploader: { select: { displayName: true, employee: { select: { legalName: true } } } } } });
-    return personal||actor.role==="EMPLOYEE"?(await Promise.all(records.map(async r=>await documentParentVisible(db,id,r.id)?r:null))).filter(r=>r!==null):records;
+    if (!releasedOnly) return records;
+    const hidden = await documentsHiddenByParent(db, id, records.map(record => record.id));
+    return records.filter(record => !hidden.has(record.id));
   });
 }
 export async function uploadDocument(identity: Identity | null, input: unknown, file: File) {

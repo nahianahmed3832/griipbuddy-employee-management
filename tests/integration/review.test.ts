@@ -132,7 +132,7 @@ describe("Phase 3D corrections, exact attendance and weekly decisions",()=>{
  await expect(d.attendanceManagement(alice,{})).rejects.toMatchObject({status:403});await expect(d.attendanceManagement(hr,{from:"2030-01-01",until:"2030-03-01"})).rejects.toMatchObject({code:"DATE_RANGE"});
  });
  it("approvals revalidate conflicting facts and roll back status, audit and notification together",async()=>{
-  const proposal=add("2030-01-08","2030-01-08T03:00:00Z","2030-01-08T05:00:00Z");const one=await c.submitCorrection(alice,proposal),two=await c.submitCorrection(alice,{...proposal,operationKey:randomUUID()});
+  const proposal=add("2030-01-08","2030-01-08T03:00:00Z","2030-01-08T05:00:00Z");const one=await c.submitCorrection(alice,proposal),two=await c.submitCorrection(alice,add("2030-01-08","2030-01-08T04:00:00Z","2030-01-08T06:00:00Z"));
   await approve(one);await expect(approve(two)).rejects.toMatchObject({code:"ATTENDANCE_OVERLAP"});
   expect((await db.attendanceCorrection.findUniqueOrThrow({where:{id:two}})).status).toBe("PENDING");expect(await db.auditLog.count({where:{entityId:two,action:"CORRECTION_APPROVED"}})).toBe(0);expect(await db.notification.count({where:{sourceId:two,eventType:"CORRECTION_DECIDED"}})).toBe(0);await c.withdrawCorrection(alice,{id:two});
  });
