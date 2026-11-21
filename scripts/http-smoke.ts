@@ -158,7 +158,8 @@ try {
   check((await hr.json(`/api/employees/${aliceId}/documents/${privateId}`, "PATCH", { employeeVisible: true, reason: "Released" })).ok && (await alice.request(`/api/me/documents/${privateId}`)).ok, "Staff release must allow the owner immediate access.");
   check((await hr.json(`/api/employees/${aliceId}/documents/${privateId}`, "PATCH", { employeeVisible: false, reason: "Return to staff" })).ok && (await alice.request(`/api/me/documents/${privateId}`)).status === 404, "Staff withdrawal must immediately deny document access.");
   const head = await alice.request(`/api/me/documents/${imageId}`, { method: "HEAD" });
-  check(head.ok && Number(head.headers.get("content-length")) > 0 && (await head.text()) === "", "Protected HEAD must return metadata without document bytes.");
+  const expectedLength = list.find((document: { id: string }) => document.id === imageId).fileSize;
+  check(head.ok && expectedLength > 0 && Number(head.headers.get("x-document-length")) === expectedLength && (await head.text()) === "", "Protected HEAD must return authorized size metadata without document bytes.");
   check((await hr.request(`/api/employees/${bobId}/documents/${imageId}`)).status === 404, "Document IDs must match the path employee even for staff.");
   const bob = new Client(); await bob.login("bob@example.test");
   check((await bob.request(`/api/me/documents/${imageId}`)).status === 404, "Tampered self-document IDs must reject another employee's file.");

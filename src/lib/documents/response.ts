@@ -12,6 +12,10 @@ export async function privateDocumentResponse(request: Request, identity: Identi
     "Content-Disposition": `${inline ? "inline" : "attachment"}; filename="document${extension}"; filename*=UTF-8''${encodeURIComponent(name).replace(/'/g, "%27")}`,
     "X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox; default-src 'none'", "X-Frame-Options": "DENY",
   };
-  if (request.method === "HEAD") { await document.file.close(); return new Response(null, { headers }); }
+  if (request.method === "HEAD") {
+    await document.file.close();
+    // Next filters transport framing headers from App Route responses.
+    return new Response(null, { headers: { ...headers, "X-Document-Length": String(document.fileSize) } });
+  }
   return new Response(Readable.toWeb(document.file.createReadStream({ autoClose: true })) as ReadableStream<Uint8Array>, { headers });
 }
